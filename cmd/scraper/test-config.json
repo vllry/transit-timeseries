@@ -1,0 +1,12 @@
+{
+    "formatVersion": "0.0",
+    "bucketName": "transit-timeseries-staging",
+    "bucketPathPrefix": "local",
+    "sources": [
+        {
+            "baseURL": "https://retro.umoiq.com/service/publicJSONFeed?command=vehicleLocations&a=ttc&t=0",
+            "ScrapeFrequencySeconds": 20,
+            "AggregationSeconds": 60
+        }
+    ]
+}

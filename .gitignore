@@ -1,0 +1,4 @@
+data
+production.json
+cmd/scraper/scraper
+*.DS_Store
