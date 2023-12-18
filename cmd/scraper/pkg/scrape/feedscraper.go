@@ -225,6 +225,21 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 		return err
 	}
 
+	// If this is a zip file (e.g. for gtfs), uncompress it in-place.
+	if strings.HasSuffix(s.source.BaseURL, ".zip") {
+		cmd := exec.Command("7z", "x", "-y", "-o"+dir, path.Join(dir, fmt.Sprintf("%d", from.Unix())))
+		err = cmd.Run()
+		if err != nil {
+			return errors.Wrap(err, "couldn't uncompress")
+		}
+
+		// Remove the zip file.
+		err = os.Remove(path.Join(dir, fmt.Sprintf("%d", from.Unix())))
+		if err != nil {
+			return errors.Wrap(err, "couldn't remove zip file")
+		}
+	}
+
 	// If this is the end of a batch, immediately compress it.
 	// We don't want to wait for the next scrape interval, because that could be a long time.
 	if len(compressDir) != 0 {
@@ -279,7 +294,7 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 	}
 
 	// 7zip the directory
-	cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", newDir+".7zip", newDir)
+	cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", newDir+".7zip", "./"+newDir)
 	err = cmd.Run()
 	if err != nil {
 		fmt.Println(cmd.Stdout, cmd.Stderr)
