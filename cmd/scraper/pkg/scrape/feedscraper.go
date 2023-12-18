@@ -260,7 +260,7 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 // and compresses it to a 7zip archive.
 func (s *FeedScraper) compressDir(dirpath string) error {
 	// Convert the base directory name to a timestamp.
-	i, err := strconv.ParseInt(path.Base(dirpath), 10, 64)
+	startTimestamp, err := strconv.ParseInt(path.Base(dirpath), 10, 64)
 	if err != nil {
 		return errors.Wrap(err, "couldn't parse directory name")
 	}
@@ -271,7 +271,8 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 		return errors.Wrap(err, "couldn't read directory")
 	}
 
-	var endTime time.Time
+	// Find the last file in the directory to use as the end time in the batch name.
+	endTimestamp := startTimestamp
 	for _, f := range files {
 		if !f.IsDir() {
 			i, err := strconv.ParseInt(f.Name(), 10, 64)
@@ -279,15 +280,14 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 				continue
 			}
 
-			t := time.Unix(i, 0)
-			if t.After(endTime) {
-				endTime = t
+			if i > endTimestamp {
+				endTimestamp = i
 			}
 		}
 	}
 
 	// Rename the directory to the start-end span of the batch.
-	newDir := path.Join(path.Dir(dirpath), fmt.Sprintf("%d-%d", i, endTime.Unix()))
+	newDir := path.Join(path.Dir(dirpath), fmt.Sprintf("%d-%d", startTimestamp, endTimestamp))
 	err = os.Rename(dirpath, newDir)
 	if err != nil {
 		return errors.Wrap(err, "couldn't rename directory")

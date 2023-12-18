@@ -82,6 +82,7 @@ func (s *Scraper) Run() error {
 
 		// Delay for a random amount of time, up to a fraction of the scrape frequency.
 		delay := time.Duration(rand.Intn(int(source.ScrapeFrequencySeconds/10))) * time.Second
+		fmt.Println("Starting scraper for", source.BaseURL, "in", delay, "seconds...")
 		time.AfterFunc(delay, scraper.Run)
 	}
 
