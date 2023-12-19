@@ -1,6 +1,7 @@
 package scrape
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -90,35 +91,6 @@ func (s *FeedScraper) Run() {
 		}
 	}
 
-	// Check if there are batch directories still on-disk, e.g. if the scraper was restarted mid-batch.
-	// If so, set the current batch start time to the start time of the most recent batch.
-	// This ensures that the scraper will continue to write to the same batch directory if we're still in the same batch window.
-	// If not, write() will handle it.
-	files, err := os.ReadDir(s.outputDirectory)
-	if err != nil {
-		panic(err)
-	}
-
-	// Find the most recent batch directory.
-	var mostRecent time.Time
-	for _, f := range files {
-		if f.IsDir() {
-			i, err := strconv.ParseInt(f.Name(), 10, 64)
-			if err != nil {
-				continue
-			}
-
-			t := time.Unix(i, 0)
-			if t.After(mostRecent) {
-				mostRecent = t
-			}
-		}
-	}
-
-	if !mostRecent.IsZero() {
-		s.lockedBatchStartTime = mostRecent
-	}
-
 	// Start the scraper.
 	go s.fetch()                                 // Run the first fetch immediately.
 	s.ticker = time.NewTicker(s.scrapeFrequency) // Don't start the ticker prematurely.
@@ -138,7 +110,7 @@ func (s *FeedScraper) Run() {
 
 // fetch fetches the source and writes the results to disk.
 func (s *FeedScraper) fetch() error {
-	now := time.Now()
+	fetchedAt := time.Now()
 
 	req, err := http.NewRequest("GET", s.source.BaseURL, nil)
 	if err != nil {
@@ -169,7 +141,7 @@ func (s *FeedScraper) fetch() error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(s.source.BaseURL, s.write(body, now))
+	fmt.Println(s.source.BaseURL, s.write(body, fetchedAt))
 
 	return nil
 }
@@ -181,60 +153,60 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 	s.shutdownLock.RLock()
 	defer s.shutdownLock.RUnlock()
 
-	// This lock protects the batch start time from being modified in an unforseen race.
-	s.batchStartTimeLock.Lock()
+	currentDir, compressDir := func() (string, string) {
+		// This lock protects the batch start time from being modified in an unforseen race.
+		s.batchStartTimeLock.Lock()
+		defer s.batchStartTimeLock.Unlock()
 
-	// Set a start time if there isn't one already.
-	if s.lockedBatchStartTime.IsZero() {
-		s.lockedBatchStartTime = from // Use the time of the first scrape.
-	}
+		// Set a start time if there isn't one already.
+		if s.lockedBatchStartTime.IsZero() {
+			s.lockedBatchStartTime = from // Use the time of the first scrape.
+			fmt.Println("Starting new batch", s.source.BaseURL, s.lockedBatchStartTime.Unix())
+		}
 
-	// If THIS scrape would put us over the batch duration, set a new batch start time.
-	// TODO: this is a hacky way to handle the case where the scraper is restarted and resumes scraping an old batch.
-	// There's probably a better way to handle all this.
-	if from.Sub(s.lockedBatchStartTime) > s.batchDuration {
-		s.lockedBatchStartTime = from
-		fmt.Println("Starting new batch", s.source.BaseURL, s.lockedBatchStartTime.Unix())
-	}
+		// Name the directory for THIS batch, using the current batch's start time.
+		dir := fmt.Sprintf("%s/%d", s.outputDirectory, s.lockedBatchStartTime.Unix()) // TODO: dedupe. Builder function?
 
-	// If the NEXT scrape would put us over the batch duration, mark the current batch for compression.
-	// We want to do this as soon as possible, to ensure long batches are compressed in a timely manner.
-	// This comparison is buffered by a second, to crudely account for the fact that the scrape interval is not exact.
-	compressDir := ""
-	if from.Add(s.scrapeFrequency).Sub(s.lockedBatchStartTime) > s.batchDuration-time.Second {
-		fmt.Println("Marking end of batch", s.source.BaseURL, s.lockedBatchStartTime.Unix())
-		compressDir = fmt.Sprintf("%s/%d", s.outputDirectory, s.lockedBatchStartTime.Unix()) // TODO: dedupe. Builder function?
-	}
+		// If the NEXT scrape would put us over the batch duration, mark the current batch for compression.
+		// We want to do this as soon as possible, to ensure long batches are compressed in a timely manner.
+		// This comparison uses a slight buffer in the scrape frequency, to compensate for some observed timing drift.
+		compressDir := ""
+		if from.Add(time.Duration(float64(s.scrapeFrequency)*1.1)).Sub(s.lockedBatchStartTime) > s.batchDuration {
+			fmt.Println("Marking end of batch", s.source.BaseURL, s.lockedBatchStartTime.Unix())
 
-	// Name the directory for this batch.
-	dir := fmt.Sprintf("%s/%d", s.outputDirectory, s.lockedBatchStartTime.Unix()) // TODO: dedupe. Builder function?
+			// Compress after the write.
+			compressDir = fmt.Sprintf("%s/%d", s.outputDirectory, s.lockedBatchStartTime.Unix()) // TODO: dedupe. Builder function?
 
-	// Release lock.
-	s.batchStartTimeLock.Unlock()
+			// Set the batch start time to zero, so the next scrape will start a new batch.
+			s.lockedBatchStartTime = time.Time{}
+		}
+
+		return dir, compressDir
+	}()
 
 	// Create the directory if it doesn't exist.
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		err := os.Mkdir(dir, 0755)
+	if _, err := os.Stat(currentDir); os.IsNotExist(err) {
+		err := os.Mkdir(currentDir, 0755)
 		if err != nil {
 			return err
 		}
 	}
 
-	err := os.WriteFile(path.Join(dir, fmt.Sprintf("%d", from.Unix())), b, 0644)
+	err := os.WriteFile(path.Join(currentDir, fmt.Sprintf("%d", from.Unix())), b, 0644)
 	if err != nil {
 		return err
 	}
 
 	// If this is a zip file (e.g. for gtfs), uncompress it in-place.
 	if strings.HasSuffix(s.source.BaseURL, ".zip") {
-		cmd := exec.Command("7z", "x", "-y", "-o"+dir, path.Join(dir, fmt.Sprintf("%d", from.Unix())))
+		cmd := exec.Command("7z", "x", "-y", "-o"+currentDir, path.Join(currentDir, fmt.Sprintf("%d", from.Unix())))
 		err = cmd.Run()
 		if err != nil {
 			return errors.Wrap(err, "couldn't uncompress")
 		}
 
 		// Remove the zip file.
-		err = os.Remove(path.Join(dir, fmt.Sprintf("%d", from.Unix())))
+		err = os.Remove(path.Join(currentDir, fmt.Sprintf("%d", from.Unix())))
 		if err != nil {
 			return errors.Wrap(err, "couldn't remove zip file")
 		}
@@ -298,6 +270,11 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 	err = cmd.Run()
 	if err != nil {
 		// Print any stdout/stderr from the command.
+		var outb, errb bytes.Buffer
+		cmd.Stdout = &outb
+		cmd.Stderr = &errb
+		fmt.Println("out:", outb.String(), "err:", errb.String())
+
 		fmt.Println("zip:", cmd.Stdout, cmd.Stderr)
 		return errors.Wrap(err, "couldn't compress")
 	}
