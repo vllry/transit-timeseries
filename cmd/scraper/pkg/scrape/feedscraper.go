@@ -294,10 +294,11 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 	}
 
 	// 7zip the directory
-	cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", newDir+".7zip", "./"+newDir)
+	cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", newDir+".7zip", newDir)
 	err = cmd.Run()
 	if err != nil {
-		fmt.Println(cmd.Stdout, cmd.Stderr)
+		// Print any stdout/stderr from the command.
+		fmt.Println("zip:", cmd.Stdout, cmd.Stderr)
 		return errors.Wrap(err, "couldn't compress")
 	}
 

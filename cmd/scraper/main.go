@@ -15,10 +15,6 @@ import (
 	"github.com/vllry/transit-timeseries/cmd/scraper/pkg/scrape"
 )
 
-const (
-	WorkingDirectory = "data"
-)
-
 // Scraper encapsulates a process scraping multiple feeds.
 type Scraper struct {
 	config       config.ScraperConfig
@@ -68,8 +64,12 @@ func NewScraper(conf config.ScraperConfig) *Scraper {
 
 // Run starts the scraper, and scrapes feeds until it receives an interrupt signal.
 func (s *Scraper) Run() error {
-	if _, err := os.Stat(WorkingDirectory); os.IsNotExist(err) {
-		err := os.Mkdir(WorkingDirectory, 0755)
+	if len(s.config.WorkingDirectory) == 0 {
+		panic("no working directory provided")
+	}
+
+	if _, err := os.Stat(s.config.WorkingDirectory); os.IsNotExist(err) {
+		err := os.Mkdir(s.config.WorkingDirectory, 0755)
 		if err != nil {
 			panic(err)
 		}
@@ -77,7 +77,7 @@ func (s *Scraper) Run() error {
 
 	// Start all feed scrapers.
 	for _, source := range s.config.Sources {
-		scraper := scrape.NewFeedScraper(source, s.config.BucketName, s.config.BucketPathPrefix, WorkingDirectory)
+		scraper := scrape.NewFeedScraper(source, s.config.BucketName, s.config.BucketPathPrefix, s.config.WorkingDirectory)
 		s.feedScrapers = append(s.feedScrapers, scraper)
 
 		// Delay for a random amount of time, up to a fraction of the scrape frequency.

@@ -7,6 +7,7 @@ type ScraperConfig struct {
 	BucketName       string          `json:"bucketName"`
 	BucketPathPrefix string          `json:"bucketPathPrefix"`
 	Sources          []ScraperSource `json:"sources"`
+	WorkingDirectory string          `json:"workingDirectory"`
 }
 
 // ScraperSource describes a scraping target
