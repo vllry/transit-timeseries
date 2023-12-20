@@ -17,8 +17,9 @@ import (
 
 // Scraper encapsulates a process scraping multiple feeds.
 type Scraper struct {
-	config       config.ScraperConfig
-	feedScrapers []*scrape.FeedScraper
+	config          config.ScraperConfig
+	feedScrapers    []*scrape.FeedScraper
+	compressionLock sync.Mutex
 }
 
 // Configure the scraper and start it.
@@ -77,7 +78,7 @@ func (s *Scraper) Run() error {
 
 	// Start all feed scrapers.
 	for _, source := range s.config.Sources {
-		scraper := scrape.NewFeedScraper(source, s.config.BucketName, s.config.BucketPathPrefix, s.config.WorkingDirectory)
+		scraper := scrape.NewFeedScraper(source, s.compressionLock, s.config.BucketName, s.config.BucketPathPrefix, s.config.WorkingDirectory)
 		s.feedScrapers = append(s.feedScrapers, scraper)
 
 		// Delay for a random amount of time, up to a fraction of the scrape frequency.

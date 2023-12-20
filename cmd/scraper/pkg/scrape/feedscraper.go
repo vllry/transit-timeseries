@@ -43,15 +43,16 @@ type FeedScraper struct {
 	bucketName       string // Name of the GCS bucket to upload to.
 	bucketPathPrefix string // Prefix for the GCS path to upload to.
 
-	ticker               *time.Ticker  // Ticker for the interval at which to scrape.
-	quit                 chan struct{} // Channel to signal the scraper to stop gracefully.
-	lockedBatchStartTime time.Time     // Timestamp of the first entity in the current batch.
-	batchStartTimeLock   sync.Mutex    // Lock for the above.
-	shutdownLock         sync.RWMutex  // Protects shutdown
+	globalCompressionLock sync.Mutex    // Lock for compressing to limit concurrent memory usage.
+	ticker                *time.Ticker  // Ticker for the interval at which to scrape.
+	quit                  chan struct{} // Channel to signal the scraper to stop gracefully.
+	lockedBatchStartTime  time.Time     // Timestamp of the first entity in the current batch.
+	batchStartTimeLock    sync.Mutex    // Lock for the above.
+	shutdownLock          sync.RWMutex  // Protects shutdown
 }
 
 // NewAgencyScraper creates a new scraper for the given feed source.
-func NewFeedScraper(source config.ScraperSource, bucketName string, bucketPathPrefix string, parentOutputDirectory string) *FeedScraper {
+func NewFeedScraper(source config.ScraperSource, globalCompressionLock sync.Mutex, bucketName string, bucketPathPrefix string, parentOutputDirectory string) *FeedScraper {
 	scrapeFrequency := DefaultScrapeInterval
 	if source.ScrapeFrequencySeconds != 0 {
 		scrapeFrequency = time.Duration(source.ScrapeFrequencySeconds) * time.Second
@@ -69,15 +70,16 @@ func NewFeedScraper(source config.ScraperSource, bucketName string, bucketPathPr
 	outputDirectory := fmt.Sprintf("%s/%s", parentOutputDirectory, urlEscaped)
 
 	return &FeedScraper{
-		authentication:     source.Authentication,
-		bucketName:         bucketName,
-		bucketPathPrefix:   bucketPathPrefix,
-		batchDuration:      batchDuration,
-		source:             source,
-		quit:               make(chan struct{}),
-		scrapeFrequency:    scrapeFrequency,
-		batchStartTimeLock: sync.Mutex{},
-		outputDirectory:    outputDirectory,
+		authentication:        source.Authentication,
+		bucketName:            bucketName,
+		bucketPathPrefix:      bucketPathPrefix,
+		batchDuration:         batchDuration,
+		source:                source,
+		globalCompressionLock: globalCompressionLock,
+		quit:                  make(chan struct{}),
+		scrapeFrequency:       scrapeFrequency,
+		batchStartTimeLock:    sync.Mutex{},
+		outputDirectory:       outputDirectory,
 	}
 }
 
@@ -266,20 +268,29 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 	}
 
 	// 7zip the directory
-	cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", newDir+".7zip", newDir)
-	err = cmd.Run()
+	err = func() error {
+		s.globalCompressionLock.Lock()
+		defer s.globalCompressionLock.Unlock()
+
+		cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", newDir+".7zip", newDir)
+		err = cmd.Run()
+		if err != nil {
+			// Print any stdout/stderr from the command.
+			var outb, errb bytes.Buffer
+			cmd.Stdout = &outb
+			cmd.Stderr = &errb
+			fmt.Println("out:", outb.String(), "err:", errb.String())
+
+			return errors.Wrap(err, "couldn't compress")
+		}
+
+		fmt.Println("Compressed", newDir)
+		return nil
+	}()
+
 	if err != nil {
-		// Print any stdout/stderr from the command.
-		var outb, errb bytes.Buffer
-		cmd.Stdout = &outb
-		cmd.Stderr = &errb
-		fmt.Println("out:", outb.String(), "err:", errb.String())
-
-		fmt.Println("zip:", cmd.Stdout, cmd.Stderr)
-		return errors.Wrap(err, "couldn't compress")
+		return err
 	}
-
-	fmt.Println("Compressed", newDir)
 
 	// Remove the directory
 	err = os.RemoveAll(newDir)

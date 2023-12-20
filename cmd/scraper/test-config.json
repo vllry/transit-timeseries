@@ -2,6 +2,7 @@
     "formatVersion": "0.0",
     "bucketName": "transit-timeseries-staging",
     "bucketPathPrefix": "local",
+    "workingDirectory": "/Users/vallery/tempdata",
     "sources": [
         {
             "baseURL": "https://retro.umoiq.com/service/publicJSONFeed?command=vehicleLocations&a=ttc&t=0",
