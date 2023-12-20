@@ -43,16 +43,18 @@ type FeedScraper struct {
 	bucketName       string // Name of the GCS bucket to upload to.
 	bucketPathPrefix string // Prefix for the GCS path to upload to.
 
-	globalCompressionLock sync.Mutex    // Lock for compressing to limit concurrent memory usage.
-	ticker                *time.Ticker  // Ticker for the interval at which to scrape.
-	quit                  chan struct{} // Channel to signal the scraper to stop gracefully.
-	lockedBatchStartTime  time.Time     // Timestamp of the first entity in the current batch.
-	batchStartTimeLock    sync.Mutex    // Lock for the above.
-	shutdownLock          sync.RWMutex  // Protects shutdown
+	globalCompressionLock   *sync.Mutex   // Lock for compressing to limit concurrent memory usage.
+	ticker                  *time.Ticker  // Ticker for the interval at which to scrape.
+	quit                    chan struct{} // Channel to signal the scraper to stop gracefully.
+	lockedBatchStartTime    time.Time     // Timestamp of the first entity in the current batch.
+	batchStartTimeLock      sync.Mutex    // Lock for the above.
+	shutdownLock            sync.RWMutex  // Protects shutdown
+	compressAndUploadTicker *time.Ticker  // Ticker for the interval at which to compress.
+	compressAndUploadLock   sync.Mutex
 }
 
 // NewAgencyScraper creates a new scraper for the given feed source.
-func NewFeedScraper(source config.ScraperSource, globalCompressionLock sync.Mutex, bucketName string, bucketPathPrefix string, parentOutputDirectory string) *FeedScraper {
+func NewFeedScraper(source config.ScraperSource, globalCompressionLock *sync.Mutex, bucketName string, bucketPathPrefix string, parentOutputDirectory string) *FeedScraper {
 	scrapeFrequency := DefaultScrapeInterval
 	if source.ScrapeFrequencySeconds != 0 {
 		scrapeFrequency = time.Duration(source.ScrapeFrequencySeconds) * time.Second
@@ -93,14 +95,18 @@ func (s *FeedScraper) Run() {
 		}
 	}
 
-	// Start the scraper.
-	go s.fetch()                                 // Run the first fetch immediately.
-	s.ticker = time.NewTicker(s.scrapeFrequency) // Don't start the ticker prematurely.
+	go s.fetch() // Run the first fetch immediately.
+
+	// Start the tickers.
+	s.ticker = time.NewTicker(s.scrapeFrequency)
+	s.compressAndUploadTicker = time.NewTicker(time.Minute)
 
 	for {
 		select {
 		case <-s.ticker.C:
 			go s.fetch()
+		case <-s.compressAndUploadTicker.C:
+			go s.CompressAndUploadAll()
 		case <-s.quit:
 			s.ticker.Stop()
 			s.shutdownLock.Lock() // Wait for writes to finish
@@ -155,7 +161,7 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 	s.shutdownLock.RLock()
 	defer s.shutdownLock.RUnlock()
 
-	currentDir, compressDir := func() (string, string) {
+	currentDir := func() string {
 		// This lock protects the batch start time from being modified in an unforseen race.
 		s.batchStartTimeLock.Lock()
 		defer s.batchStartTimeLock.Unlock()
@@ -172,18 +178,14 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 		// If the NEXT scrape would put us over the batch duration, mark the current batch for compression.
 		// We want to do this as soon as possible, to ensure long batches are compressed in a timely manner.
 		// This comparison uses a slight buffer in the scrape frequency, to compensate for some observed timing drift.
-		compressDir := ""
 		if from.Add(time.Duration(float64(s.scrapeFrequency)*1.1)).Sub(s.lockedBatchStartTime) > s.batchDuration {
 			fmt.Println("Marking end of batch", s.source.BaseURL, s.lockedBatchStartTime.Unix())
-
-			// Compress after the write.
-			compressDir = fmt.Sprintf("%s/%d", s.outputDirectory, s.lockedBatchStartTime.Unix()) // TODO: dedupe. Builder function?
 
 			// Set the batch start time to zero, so the next scrape will start a new batch.
 			s.lockedBatchStartTime = time.Time{}
 		}
 
-		return dir, compressDir
+		return dir
 	}()
 
 	// Create the directory if it doesn't exist.
@@ -214,16 +216,53 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 		}
 	}
 
-	// If this is the end of a batch, immediately compress it.
-	// We don't want to wait for the next scrape interval, because that could be a long time.
-	if len(compressDir) != 0 {
-		err := s.compressDir(compressDir)
-		if err != nil {
-			return errors.Wrap(err, "failed to compress")
-		}
-		err = s.uploadAll()
-		if err != nil {
-			return errors.Wrap(err, "failed to upload")
+	return nil
+}
+
+func (s *FeedScraper) CompressAndUploadAll() error {
+	// This is a terrible hack to avoid concurrency issues with repeated ticker fires
+	s.compressAndUploadLock.Lock()
+	defer s.compressAndUploadLock.Unlock()
+
+	// TODO: account for the fact that failures to compress will leave a start-end batch directory,
+	// but compress() expects a start batch directory.
+
+	compressErr := s.compressAll()
+	if compressErr != nil {
+		// If compression fails, still try to upload any archives that were already compressed.
+		fmt.Println("compress failed", compressErr)
+	}
+
+	uploadErr := s.uploadAll()
+	if uploadErr != nil {
+		fmt.Println("upload failed", uploadErr)
+	}
+
+	if compressErr != nil {
+		return compressErr
+	}
+	return uploadErr
+}
+
+// compressAll compresses all directories in the output directory,
+// excluding the current batch directory.
+func (s *FeedScraper) compressAll() error {
+	files, err := os.ReadDir(s.outputDirectory)
+	if err != nil {
+		return errors.Wrap(err, "failed to read output directory")
+	}
+
+	// Don't compress the current batch directory.
+	s.batchStartTimeLock.Lock()
+	currentBatchName := fmt.Sprintf("%d", s.lockedBatchStartTime.Unix())
+	s.batchStartTimeLock.Unlock()
+
+	for _, f := range files {
+		if f.IsDir() && f.Name() != currentBatchName {
+			err = s.compressDir(path.Join(s.outputDirectory, f.Name()))
+			if err != nil {
+				fmt.Println("failed to compress", f.Name(), err)
+			}
 		}
 	}
 
@@ -232,48 +271,59 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 
 // compressDir takes a directory named after a unix timestamp, renames it to the start-end span of the timestamped files within,
 // and compresses it to a 7zip archive.
-func (s *FeedScraper) compressDir(dirpath string) error {
-	// Convert the base directory name to a timestamp.
-	startTimestamp, err := strconv.ParseInt(path.Base(dirpath), 10, 64)
-	if err != nil {
-		return errors.Wrap(err, "couldn't parse directory name")
-	}
+func (s *FeedScraper) compressDir(batchDir string) error {
+	// compressDir expects a directory named after either a unix timestamp (batch start time),
+	// or a start-end span of unix timestamps (batch start and end times).
+	// TODO: this is a sign that this function is doing too much.
 
-	// Find the end time of the batch from the last file in the directory.
-	files, err := os.ReadDir(dirpath)
-	if err != nil {
-		return errors.Wrap(err, "couldn't read directory")
-	}
+	dirToCompress := batchDir
 
-	// Find the last file in the directory to use as the end time in the batch name.
-	endTimestamp := startTimestamp
-	for _, f := range files {
-		if !f.IsDir() {
-			i, err := strconv.ParseInt(f.Name(), 10, 64)
-			if err != nil {
-				continue
+	baseName := path.Base(batchDir)
+	if !strings.Contains(baseName, "-") {
+		// Convert the base directory name to a timestamp.
+		startTimestamp, err := strconv.ParseInt(path.Base(batchDir), 10, 64)
+		if err != nil {
+			return errors.Wrap(err, "couldn't parse directory name")
+		}
+
+		// Find the end time of the batch from the last file in the directory.
+		files, err := os.ReadDir(batchDir)
+		if err != nil {
+			return errors.Wrap(err, "couldn't read directory")
+		}
+
+		// Find the last file in the directory to use as the end time in the batch name.
+		endTimestamp := startTimestamp
+		for _, f := range files {
+			if !f.IsDir() {
+				i, err := strconv.ParseInt(f.Name(), 10, 64)
+				if err != nil {
+					continue
+				}
+
+				if i > endTimestamp {
+					endTimestamp = i
+				}
 			}
+		}
 
-			if i > endTimestamp {
-				endTimestamp = i
-			}
+		// Rename the directory to the start-end span of the batch.
+		dirToCompress = path.Join(path.Dir(batchDir), fmt.Sprintf("%d-%d", startTimestamp, endTimestamp))
+		err = os.Rename(batchDir, dirToCompress)
+		if err != nil {
+			return errors.Wrap(err, "couldn't rename directory")
 		}
 	}
 
-	// Rename the directory to the start-end span of the batch.
-	newDir := path.Join(path.Dir(dirpath), fmt.Sprintf("%d-%d", startTimestamp, endTimestamp))
-	err = os.Rename(dirpath, newDir)
-	if err != nil {
-		return errors.Wrap(err, "couldn't rename directory")
-	}
+	archivePath := dirToCompress + ".7zip"
 
 	// 7zip the directory
-	err = func() error {
+	err := func() error {
 		s.globalCompressionLock.Lock()
 		defer s.globalCompressionLock.Unlock()
 
-		cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", newDir+".7zip", newDir)
-		err = cmd.Run()
+		cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", archivePath, dirToCompress)
+		err := cmd.Run()
 		if err != nil {
 			// Print any stdout/stderr from the command.
 			var outb, errb bytes.Buffer
@@ -281,10 +331,13 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 			cmd.Stderr = &errb
 			fmt.Println("out:", outb.String(), "err:", errb.String())
 
+			// Delete any partial archive.
+			os.Remove(archivePath)
+
 			return errors.Wrap(err, "couldn't compress")
 		}
 
-		fmt.Println("Compressed", newDir)
+		fmt.Println("Compressed", dirToCompress)
 		return nil
 	}()
 
@@ -293,7 +346,7 @@ func (s *FeedScraper) compressDir(dirpath string) error {
 	}
 
 	// Remove the directory
-	err = os.RemoveAll(newDir)
+	err = os.RemoveAll(dirToCompress)
 	return err
 }
 
