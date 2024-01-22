@@ -3,6 +3,7 @@ package scrape
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -16,7 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/vllry/transit-timeseries/cmd/scraper/pkg/config"
+	"github.com/vllry/transit-timeseries/pkg/types"
 
 	"cloud.google.com/go/storage"
 	"github.com/pkg/errors"
@@ -40,6 +43,9 @@ type FeedScraper struct {
 	batchDuration   time.Duration        // Maximum range of time to batch a set of results.
 	outputDirectory string               // Parent directory to write the scraped data to.
 
+	kafkaProducer    *kafka.Producer
+	kafkaStaticTopic string
+
 	bucketName       string // Name of the GCS bucket to upload to.
 	bucketPathPrefix string // Prefix for the GCS path to upload to.
 
@@ -54,7 +60,7 @@ type FeedScraper struct {
 }
 
 // NewAgencyScraper creates a new scraper for the given feed source.
-func NewFeedScraper(source config.ScraperSource, globalCompressionLock *sync.Mutex, bucketName string, bucketPathPrefix string, parentOutputDirectory string) *FeedScraper {
+func NewFeedScraper(source config.ScraperSource, globalCompressionLock *sync.Mutex, bucketName string, bucketPathPrefix string, parentOutputDirectory string, kafkaAddress string, kafkaStaticTopic string) *FeedScraper {
 	scrapeFrequency := DefaultScrapeInterval
 	if source.ScrapeFrequencySeconds != 0 {
 		scrapeFrequency = time.Duration(source.ScrapeFrequencySeconds) * time.Second
@@ -71,6 +77,11 @@ func NewFeedScraper(source config.ScraperSource, globalCompressionLock *sync.Mut
 	urlEscaped := url.PathEscape(strings.TrimPrefix(strings.TrimPrefix(source.BaseURL, "http://"), "https://"))
 	outputDirectory := fmt.Sprintf("%s/%s", parentOutputDirectory, urlEscaped)
 
+	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": kafkaAddress})
+	if err != nil {
+		panic(err)
+	}
+
 	return &FeedScraper{
 		authentication:        source.Authentication,
 		bucketName:            bucketName,
@@ -82,12 +93,31 @@ func NewFeedScraper(source config.ScraperSource, globalCompressionLock *sync.Mut
 		scrapeFrequency:       scrapeFrequency,
 		batchStartTimeLock:    sync.Mutex{},
 		outputDirectory:       outputDirectory,
+		kafkaProducer:         producer,
+		kafkaStaticTopic:      kafkaStaticTopic,
 	}
 }
 
 // Run periodically scrapes the source and writes the data to disk in batched directories.
 // Once a batch is complete, it compresses and uploads the batch.
 func (s *FeedScraper) Run() {
+	defer s.kafkaProducer.Close() // TODO: is this the right place to defer?
+
+	// Listen for Kafka events and log them.
+	go func() {
+		for e := range s.kafkaProducer.Events() {
+			switch ev := e.(type) {
+			case *kafka.Message:
+				if ev.TopicPartition.Error != nil {
+					fmt.Printf("Delivery failed: %v\n", ev.TopicPartition)
+				} else {
+					fmt.Printf("Delivered message to %v\n", ev.TopicPartition)
+				}
+			}
+		}
+	}()
+
+	// Create the output directory if it doesn't exist.
 	if _, err := os.Stat(s.outputDirectory); os.IsNotExist(err) {
 		err := os.Mkdir(s.outputDirectory, 0755)
 		if err != nil {
@@ -109,7 +139,8 @@ func (s *FeedScraper) Run() {
 			go s.CompressAndUploadAll()
 		case <-s.quit:
 			s.ticker.Stop()
-			s.shutdownLock.Lock() // Wait for writes to finish
+			s.shutdownLock.Lock()            // Wait for writes to finish
+			s.kafkaProducer.Flush(15 * 1000) // TODO: is this the right place to flush?
 			fmt.Println("Shutting down scraper...")
 			return
 		}
@@ -199,6 +230,18 @@ func (s *FeedScraper) write(b []byte, from time.Time) error {
 	err := os.WriteFile(path.Join(currentDir, fmt.Sprintf("%d", from.Unix())), b, 0644)
 	if err != nil {
 		return err
+	}
+
+	// Double-write static content to Kafka
+	if s.source.IsStatic {
+		err = s.insert(types.ScrapedStaticContent{
+			Source:    s.source.BaseURL,
+			Content:   b,
+			ScrapedAt: from,
+		})
+		if err != nil {
+			fmt.Println("insert err", err)
+		}
 	}
 
 	// If this is a zip file (e.g. for gtfs), uncompress it in-place.
@@ -411,6 +454,22 @@ func (s *FeedScraper) uploadSingle(filePath string) error {
 	}
 
 	return nil
+}
+
+// Insert into Kafka
+func (s *FeedScraper) insert(data types.ScrapedStaticContent) error {
+	marshalled, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	// Produce messages to topic (asynchronously)
+	err = s.kafkaProducer.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &s.kafkaStaticTopic, Partition: kafka.PartitionAny},
+		Value:          marshalled,
+	}, nil)
+
+	return err
 }
 
 func (s *FeedScraper) Quit() {

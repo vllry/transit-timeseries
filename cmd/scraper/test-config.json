@@ -1,13 +1,20 @@
 {
     "formatVersion": "0.0",
-    "bucketName": "transit-timeseries-staging",
-    "bucketPathPrefix": "local",
+    "bucketName": "transit-timeseries-nearline",
+    "bucketPathPrefix": "staging",
     "workingDirectory": "/Users/vallery/tempdata",
+    "kafkaTopic": "transit-timeseries-staging",
     "sources": [
         {
             "baseURL": "https://retro.umoiq.com/service/publicJSONFeed?command=vehicleLocations&a=ttc&t=0",
-            "ScrapeFrequencySeconds": 20,
-            "AggregationSeconds": 60
+            "ScrapeFrequencySeconds": 30,
+            "AggregationSeconds": 300
+        },
+        {
+            "baseURL": "http://victoria.mapstrat.com/current/google_transit.zip",
+            "ScrapeFrequencySeconds": 300,
+            "AggregationSeconds": 300,
+            "IsStatic": true
         }
     ]
 }

@@ -8,12 +8,14 @@ type ScraperConfig struct {
 	BucketPathPrefix string          `json:"bucketPathPrefix"`
 	Sources          []ScraperSource `json:"sources"`
 	WorkingDirectory string          `json:"workingDirectory"`
+	KafkaAddress     string          `json:"kafkaAddress"`
+	KafkaStaticTopic string          `json:"kafkaStaticTopic"` // KafkaStaticTopic is the topic to which static data is published
 }
 
 // ScraperSource describes a scraping target
-// ScraperSource is a placeholder for holding auth info (e.g. MTC's 511 API requires an API key)
 type ScraperSource struct {
 	BaseURL                string                `json:"baseURL"`                // BaseURL is the base URL for the target, without any auth info
+	IsStatic               bool                  `json:"isStatic"`               // IsStatic is true if the target is a static file that (allegedly) changes infrequently
 	Authentication         ScraperAuthentication `json:"authentication"`         // Authentication is any auth info for the target
 	ScrapeFrequencySeconds int                   `json:"scrapeFrequencySeconds"` // ScrapeFrequencySeconds is the frequency at which to scrape the target
 	AggregationSeconds     int                   `json:"aggregationSeconds"`     // AggregationSeconds is the duration of time to aggregate data before uploading
