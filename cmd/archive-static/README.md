@@ -1,0 +1,1 @@
+# archive-static handles the archiving of static content.
