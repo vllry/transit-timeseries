@@ -34,11 +34,12 @@ const (
 
 // FeedScraper encapsulates a process scraping a single feed.
 type FeedScraper struct {
-	authentication  config.ScraperAuthentication
-	source          config.ScraperSource // Source and identifiers for the feed.
-	scrapeFrequency time.Duration        // Frequency at which to scrape the feed.
-	batchDuration   time.Duration        // Maximum range of time to batch a set of results.
-	outputDirectory string               // Parent directory to write the scraped data to.
+	authentication    config.ScraperAuthentication
+	authRotationIndex int                  // Index of the current auth info to use.
+	source            config.ScraperSource // Source and identifiers for the feed.
+	scrapeFrequency   time.Duration        // Frequency at which to scrape the feed.
+	batchDuration     time.Duration        // Maximum range of time to batch a set of results.
+	outputDirectory   string               // Parent directory to write the scraped data to.
 
 	bucketName       string // Name of the GCS bucket to upload to.
 	bucketPathPrefix string // Prefix for the GCS path to upload to.
@@ -135,6 +136,19 @@ func (s *FeedScraper) fetch() error {
 			q.Add(k, v)
 		}
 		req.URL.RawQuery = q.Encode()
+	} else if len(s.source.AuthenticationRotating) > 0 && len(s.source.AuthenticationRotating[0].Parameters) > 0 {
+		// This is a real bad hack to get around the fact that the MTC 511 API has a very low limit and
+		// is unresponsive to rate increase requests.
+		// We rotate through API keys to get around this.
+		// TODO: this should be more standardized, this code is messy and it may come up again.
+		q := req.URL.Query()
+		for k, v := range s.source.AuthenticationRotating[s.authRotationIndex].Parameters {
+			q.Add(k, v)
+		}
+		req.URL.RawQuery = q.Encode()
+
+		// Rotate the auth index.
+		s.authRotationIndex = (s.authRotationIndex + 1) % len(s.source.AuthenticationRotating)
 	}
 
 	client := &http.Client{}

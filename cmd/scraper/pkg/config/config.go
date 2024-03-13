@@ -13,10 +13,11 @@ type ScraperConfig struct {
 // ScraperSource describes a scraping target
 // ScraperSource is a placeholder for holding auth info (e.g. MTC's 511 API requires an API key)
 type ScraperSource struct {
-	BaseURL                string                `json:"baseURL"`                // BaseURL is the base URL for the target, without any auth info
-	Authentication         ScraperAuthentication `json:"authentication"`         // Authentication is any auth info for the target
-	ScrapeFrequencySeconds int                   `json:"scrapeFrequencySeconds"` // ScrapeFrequencySeconds is the frequency at which to scrape the target
-	AggregationSeconds     int                   `json:"aggregationSeconds"`     // AggregationSeconds is the duration of time to aggregate data before uploading
+	BaseURL                string                  `json:"baseURL"`                // BaseURL is the base URL for the target, without any auth info
+	Authentication         ScraperAuthentication   `json:"authentication"`         // Authentication is any auth info for the target
+	AuthenticationRotating []ScraperAuthentication `json:"authenticationRotating"` // AuthenticationRotating is a list of auth info for the target, to be rotated per request, eg to split requests across multiple API keys
+	ScrapeFrequencySeconds int                     `json:"scrapeFrequencySeconds"` // ScrapeFrequencySeconds is the frequency at which to scrape the target
+	AggregationSeconds     int                     `json:"aggregationSeconds"`     // AggregationSeconds is the duration of time to aggregate data before uploading
 }
 
 type ScraperAuthentication struct {
