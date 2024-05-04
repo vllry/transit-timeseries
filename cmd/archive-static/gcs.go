@@ -6,15 +6,15 @@ import (
 	"cloud.google.com/go/storage"
 )
 
-type Uploader interface {
+type ObjectStore interface {
 	Upload(bucket string, prefix string, filename string, content []byte) error
 }
 
-type GcsUploader struct {
+type GoogleCloudStorage struct {
 	client *storage.Client
 }
 
-func NewGcsUploader() (*GcsUploader, error) {
+func NewGoogleCloudStorage() (*GoogleCloudStorage, error) {
 	// TODO: allow auth with explcit credentials or GKE service account
 	client, err := storage.NewClient(context.Background())
 	if err != nil {
@@ -22,12 +22,12 @@ func NewGcsUploader() (*GcsUploader, error) {
 	}
 	defer client.Close()
 
-	return &GcsUploader{
+	return &GoogleCloudStorage{
 		client: client,
 	}, nil
 }
 
-func (u *GcsUploader) Upload(bucket string, prefix string, filename string, content []byte) error {
+func (u *GoogleCloudStorage) Upload(bucket string, prefix string, filename string, content []byte) error {
 	ctx := context.Background()
 	bkt := u.client.Bucket(bucket)
 	obj := bkt.Object(prefix + "/" + filename)

@@ -80,65 +80,9 @@ func TestApp_processMessage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Launch Postgres with Docker
-			cmd := exec.Command("docker", "run", "-d", "-p", "5432:5432", "-e", "POSTGRES_PASSWORD=mysecretpassword", "postgres")
-			err := cmd.Run()
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			// Wait for Postgres to start
-			time.Sleep(5 * time.Second)
-
-			// Connect to Postgres
-			var dbUrl string
-			conn, err := pgx.Connect(context.Background(), dbUrl)
-			assert.NoError(t, err)
-
-			// Run all steps
-			for _, step := range tc.steps {
-				t.Run(step.name, func(t *testing.T) {
-					err := app.processMessage(step.message)
-					if step.expectErr {
-						assert.Error(t, err)
-					} else {
-						assert.NoError(t, err)
-					}
-				})
-						}
-
-						// Check that the final state is as expected
-						for _, expect := range tc.expect {
-							t.Run("checks database", func(t *testing.T) {
-								// Perform database checks
-							})
-
-							t.Run("checks uploader", func(t *testing.T) {
-								// Perform uploader checks
-							})
-						}
-
-						// Stop and remove the Docker container
-						cmd = exec.Command("docker", "stop", "<container_id>")
-						err = cmd.Run()
-						if err != nil {
-							t.Fatal(err)
-						}
-
-						cmd = exec.Command("docker", "rm", "<container_id>")
-						err = cmd.Run()
-						if err != nil {
-							t.Fatal(err)
-						}
-					})
-				}
-			}
-
-
 			uploader := NewFakeUploader()
 			app := App{
-				db:       db,
-				uploader: uploader,
+				storage: uploader,
 			}
 
 			// Run all steps
@@ -150,18 +94,6 @@ func TestApp_processMessage(t *testing.T) {
 					} else {
 						assert.NoError(t, err)
 					}
-				})
-			}
-
-			// Check that the final state is as expected
-			for _, expect := range tc.expect {
-				t.Run("checks database", func(t *testing.T) {
-					db.entries
-				})
-
-				t.Run("checks uploader", func(t *testing.T) {
-					ok := uploader.Has(expect.hash)
-					assert.True(t, ok)
 				})
 			}
 		})

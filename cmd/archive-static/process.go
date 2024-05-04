@@ -20,8 +20,7 @@ type App struct {
 	gcsBucket  string
 	gcsPrefix  string
 
-	uploader Uploader
-	db       Database
+	storage  ObjectStore
 	consumer *kafka.Consumer
 }
 
@@ -29,7 +28,6 @@ type AppConfig struct {
 	kafkaTopic string
 	gcsBucket  string
 	gcsPrefix  string
-	db         Database
 }
 
 func NewApp(config AppConfig) *App {
@@ -99,63 +97,75 @@ func (app *App) processMessage(msg *kafka.Message) error {
 // processStaticContent processes the typed message.
 func (app *App) processStaticContent(content types.ScrapedStaticContent) error {
 	// Check if the content is new
-	isNew, hash, err := app.checkIfNew(content)
-	if err != nil {
-		return err
-	}
-
-	if !isNew {
-		fmt.Printf("Content is not new: %s\n", content.Url)
-		return nil
-	}
-
-	// Write the content to GCS
-	err = app.writeToGCS(content)
-	if err != nil {
-		return err
-	}
-
-	// Convert ScrapedAt from unix to time.Time
-	scrapedAt := time.Unix(content.ScrapedAt, 0)
-
-	// Insert the content into the database
-	err = app.db.InsertStatic(content.Url, scrapedAt, hash)
-	if err != nil {
-		return err
-	}
-
+	// hash := app.hash(content.Content)
 	return nil
 }
 
 // hash returns the sha256 hash of the content.
-func (app *App) hash(content []byte) string {
+func hash(content []byte) string {
 	hash := sha256.Sum256(content)
 	return fmt.Sprintf("%x", hash[:])
 }
 
-// checkIfNew checks if the static content is new, using the database.
-// Content is "new" if it is different than the chronologically previous content.
-// Note that this doesn't mean the content is unique - it could be the same as an older version.
-// We just want to avoid storing sucessive duplicates.
-// TODO: split out DB interaction and hashing into separate methods
-func (app *App) checkIfNew(content types.ScrapedStaticContent) (bool, string, error) {
-	hash := app.hash(content.Content)
-	if len(hash) == 0 {
-		return false, "", errors.New("hash is empty")
-	}
-
-	// Convert ScrapedAt from unix to time.Time
-	scrapedAt := time.Unix(content.ScrapedAt, 0)
-
-	prevHash, err := app.db.GetPreviousHash(content.Url, scrapedAt)
-	if err != nil {
-		return false, "", err
-	}
-
-	return hash != prevHash, hash, nil
-}
-
 // writeToGCS writes the content to GCS.
 func (app *App) writeToGCS(content types.ScrapedStaticContent) error {
-	return app.uploader.Upload(app.gcsBucket, app.gcsPrefix, content.Url, content.Content)
+	return app.storage.Upload(app.gcsBucket, app.gcsPrefix, content.Url, content.Content)
+}
+
+func updateIndex(versions StaticSourceArchive, sha string, filepath string, observed time.Time) StaticSourceArchive {
+	var overlapExists bool
+
+	// Check for overlaps with other versions
+	for _, v := range versions.Versions {
+		for _, tr := range v.TimeRanges {
+			if observed.After(tr.Start) && observed.Before(tr.End) {
+				overlapExists = true
+				break
+			}
+		}
+		if overlapExists {
+			break
+		}
+	}
+
+	for i, v := range versions.Versions {
+		if v.Hash == sha {
+			if !overlapExists {
+				// Try to extend an existing TimeRange
+				extended := false
+				for j, tr := range v.TimeRanges {
+					// Extend end if observed time is right after current end
+					if tr.End.Add(time.Second).Equal(observed) || tr.End.Equal(observed) {
+						versions.Versions[i].TimeRanges[j].End = observed
+						extended = true
+						break
+					}
+					// Extend start if observed time is right before current start
+					if tr.Start.Add(-time.Second).Equal(observed) {
+						versions.Versions[i].TimeRanges[j].Start = observed
+						extended = true
+						break
+					}
+				}
+				if !extended {
+					// Add new TimeRange if no extension occurred
+					versions.Versions[i].TimeRanges = append(versions.Versions[i].TimeRanges, TimeRange{Start: observed, End: observed})
+				}
+			} else {
+				// Add new TimeRange due to overlap with other version's time range
+				versions.Versions[i].TimeRanges = append(versions.Versions[i].TimeRanges, TimeRange{Start: observed, End: observed})
+			}
+			return versions
+		}
+	}
+
+	// If SHA does not exist, add a new Version
+	newVersion := Version{
+		Hash:        sha,
+		StoragePath: filepath,
+		TimeRanges:  []TimeRange{{Start: observed, End: observed}},
+	}
+	versions.Versions = append(versions.Versions, newVersion)
+
+	return versions
 }
