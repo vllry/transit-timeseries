@@ -336,7 +336,7 @@ func (s *FeedScraper) compressDir(batchDir string) error {
 		s.globalCompressionLock.Lock()
 		defer s.globalCompressionLock.Unlock()
 
-		cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=9", "-mfb=64", "-md=32m", archivePath, dirToCompress)
+		cmd := exec.Command("7z", "a", "-t7z", "-m0=lzma", "-mx=5", "-mfb=64", "-md=32m", archivePath, dirToCompress)
 		err := cmd.Run()
 		if err != nil {
 			// Print any stdout/stderr from the command.

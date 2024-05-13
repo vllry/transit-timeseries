@@ -53,11 +53,11 @@ spec:
           - /config/production.json 
         resources:
           requests:
-            cpu: 200m
-            memory: 1G
+            cpu: 50m
+            memory: 256M
           limits:
             cpu: 1
-            memory: 2G
+            memory: 1G
         volumeMounts:
           - name: data
             mountPath: /data
